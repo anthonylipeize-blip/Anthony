@@ -1,5 +1,8 @@
 name: Test Windows updater installation
 on:
+  push:
+    paths: ['.github/workflows/test-lightlink-windows-update.yml']
+  workflow_dispatch:
   workflow_run:
     workflows: ['Publish encrypted LightLink Windows']
     types: [completed]
@@ -7,7 +10,7 @@ permissions:
   contents: read
 jobs:
   native-update:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -15,7 +18,7 @@ jobs:
         shell: pwsh
         env:
           REPOSITORY: ${{ github.repository }}
-          PUBLISH_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          PUBLISH_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           $metadata = Invoke-RestMethod "https://raw.githubusercontent.com/$env:REPOSITORY/$env:PUBLISH_COMMIT/windows/publish.json"
@@ -62,7 +65,13 @@ jobs:
           '{"global":true,"sentinel":"preserve-settings"}' | Set-Content "$data/settings.json"
           $before = (Get-FileHash "$data/settings.json").Hash
           $previous = Start-Process "$target/LightLink.exe" -PassThru
-          Start-Sleep -Seconds 1
+          $oldReady = $false
+          for ($i=0;$i -lt 300;$i++) {
+            if (Test-Path "$target/started.marker") { $oldReady=$true;break }
+            if ($previous.HasExited) { throw "Old fixture exited with code $($previous.ExitCode)" }
+            Start-Sleep -Milliseconds 100
+          }
+          if (-not $oldReady) { throw 'Old fixture startup timed out' }
           $pidArgument = "--wait-pid=$($previous.Id)"
           $timeArgument = "--wait-start=$($previous.StartTime.ToUniversalTime().Ticks)"
           $installer = Start-Process "$PWD/setup/LightLink-Setup.exe" -ArgumentList @('--update',$pidArgument,$timeArgument,'--restart') -PassThru
