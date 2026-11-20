@@ -1,0 +1,47 @@
+name: Publish encrypted LightLink Windows
+on:
+  push:
+    paths: ['windows/publish.json']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch verified encrypted release assets
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import urllib.request,ssl,json,hashlib,re,os,pathlib
+          repo=os.environ['REPOSITORY'];commit=os.environ['COMMIT']
+          url=f'https://raw.githubusercontent.com/{repo}/{commit}/windows/publish.json'
+          with urllib.request.urlopen(url,timeout=30) as r:p=json.load(r)
+          assert re.fullmatch(r'\d+\.\d+\.\d+',p['version'])
+          pathlib.Path('certificate.pem').write_text(p['certificate'])
+          ctx=ssl.create_default_context(cafile='certificate.pem')
+          for f in p['files']:
+              name=f['name']
+              assert re.fullmatch(r'[A-Za-z0-9._-]+',name)
+              assert f['url'].startswith('https://209.38.175.101:38443/windows/')
+              h=hashlib.sha256()
+              with urllib.request.urlopen(f['url'],context=ctx,timeout=120) as r,open(name,'wb') as out:
+                  while chunk:=r.read(1024*1024): h.update(chunk);out.write(chunk)
+              assert h.hexdigest()==f['sha256']
+          pathlib.Path('version.txt').write_text(p['version'])
+          pathlib.Path('assets.txt').write_text('\n'.join(f['name'] for f in p['files']))
+          PY
+      - name: Publish encrypted installer and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="$(cat version.txt)"
+          tag="lightlink-windows-$version"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "LightLink Windows $version" --notes "Private installer is AES-GCM encrypted. Use the LightLink in-app updater. Source and third-party licenses are included."
+          while IFS= read -r asset || [ -n "$asset" ]; do
+            gh release upload "$tag" "$asset" --clobber
+          done < assets.txt
