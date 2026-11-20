@@ -56,6 +56,12 @@ jobs:
           $root = Join-Path $PWD source/windows-client
           New-Item -ItemType Directory -Force "$root/build" | Out-Null
           Compress-Archive -Path "$PWD/new/*" -DestinationPath "$root/build/payload.zip"
+          $installerSource = "$root/src/Installer/Program.cs"
+          $code = [IO.File]::ReadAllText($installerSource)
+          $code = $code.Replace('ApplicationConfiguration.Initialize();','File.AppendAllText(Path.Combine(Path.GetTempPath(),"lightlink-installer-ci.log"),"MAIN\\n");ApplicationConfiguration.Initialize();')
+          $code = [regex]::Replace($code,'catch\(Exception e\)\s*\{','catch(Exception e){File.AppendAllText(Path.Combine(Path.GetTempPath(),"lightlink-installer-ci.log"),e.ToString()+"\\n");')
+          $code = $code.Replace('catch{MessageBox.Show','catch(Exception shortcutError){File.AppendAllText(Path.Combine(Path.GetTempPath(),"lightlink-installer-ci.log"),shortcutError.ToString()+"\\n");MessageBox.Show')
+          [IO.File]::WriteAllText($installerSource,$code)
           dotnet publish "$root/src/Installer/Installer.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o setup
           if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
           $target = Join-Path $env:LOCALAPPDATA LightLink/app
@@ -79,7 +85,12 @@ jobs:
           if ($installer.HasExited) { throw 'Installer did not wait for the old process' }
           if ((Get-Content "$target/started.marker") -ne '0.1.0') { throw 'Old installation was replaced too early' }
           New-Item "$target/stop.flag" -ItemType File | Out-Null
-          if (-not $installer.WaitForExit(60000)) { throw 'Installer handoff timed out' }
+          if (-not $installer.WaitForExit(60000)) {
+            $trace = Join-Path ([IO.Path]::GetTempPath()) lightlink-installer-ci.log
+            if (Test-Path $trace) { Get-Content $trace }
+            Get-ChildItem (Split-Path $target) -Recurse | Select-Object FullName
+            throw 'Installer handoff timed out'
+          }
           $ready = $false
           for ($i=0;$i -lt 100;$i++) {
             if ((Test-Path "$target/started.marker") -and (Get-Content "$target/started.marker") -eq '0.2.0') { $ready=$true;break }
