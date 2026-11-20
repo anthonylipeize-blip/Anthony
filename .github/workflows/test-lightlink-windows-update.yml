@@ -1,0 +1,80 @@
+name: Test Windows updater installation
+on:
+  workflow_run:
+    workflows: ['Publish encrypted LightLink Windows']
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  native-update:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Get credential-free tested source
+        shell: pwsh
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PUBLISH_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = Invoke-RestMethod "https://raw.githubusercontent.com/$env:REPOSITORY/$env:PUBLISH_COMMIT/windows/publish.json"
+          $version = $metadata.version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version' }
+          $asset = "lightlink-windows-$version-source.zip"
+          $expected = ($metadata.files | Where-Object name -eq $asset).sha256
+          Invoke-WebRequest "https://github.com/$env:REPOSITORY/releases/download/lightlink-windows-$version/$asset" -OutFile source.zip
+          if ((Get-FileHash source.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Source digest mismatch' }
+          Expand-Archive source.zip -DestinationPath source
+          dotnet --list-sdks
+      - name: Test real installer handoff and retained settings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+          $work = Join-Path $PWD fixture
+          New-Item -ItemType Directory -Force $work | Out-Null
+          @'
+          <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0</TargetFramework><AssemblyName>LightLink</AssemblyName><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
+          '@ | Set-Content "$work/Fixture.csproj"
+          @'
+          using System.Reflection;
+          File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"started.marker"),Assembly.GetExecutingAssembly().GetName().Version!.ToString(3));
+          while(!File.Exists(Path.Combine(AppContext.BaseDirectory,"stop.flag")))Thread.Sleep(100);
+          '@ | Set-Content "$work/Program.cs"
+          dotnet publish "$work/Fixture.csproj" -c Release -r win-x64 --self-contained false -p:Version=0.1.0 -o old
+          if ($LASTEXITCODE -ne 0) { throw 'Old fixture build failed' }
+          dotnet publish "$work/Fixture.csproj" -c Release -r win-x64 --self-contained false -p:Version=0.2.0 -o new
+          if ($LASTEXITCODE -ne 0) { throw 'New fixture build failed' }
+          $root = Join-Path $PWD source/windows-client
+          New-Item -ItemType Directory -Force "$root/build" | Out-Null
+          Compress-Archive -Path "$PWD/new/*" -DestinationPath "$root/build/payload.zip"
+          dotnet publish "$root/src/Installer/Installer.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o setup
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+          $target = Join-Path $env:LOCALAPPDATA LightLink/app
+          $data = Join-Path $env:LOCALAPPDATA LightLink/data
+          New-Item -ItemType Directory -Force $target,$data | Out-Null
+          Copy-Item "$PWD/old/*" $target -Recurse -Force
+          '{"global":true,"sentinel":"preserve-settings"}' | Set-Content "$data/settings.json"
+          $before = (Get-FileHash "$data/settings.json").Hash
+          $previous = Start-Process "$target/LightLink.exe" -PassThru
+          Start-Sleep -Seconds 1
+          $pidArgument = "--wait-pid=$($previous.Id)"
+          $timeArgument = "--wait-start=$($previous.StartTime.ToUniversalTime().Ticks)"
+          $installer = Start-Process "$PWD/setup/LightLink-Setup.exe" -ArgumentList @('--update',$pidArgument,$timeArgument,'--restart') -PassThru
+          Start-Sleep -Seconds 2
+          if ($installer.HasExited) { throw 'Installer did not wait for the old process' }
+          if ((Get-Content "$target/started.marker") -ne '0.1.0') { throw 'Old installation was replaced too early' }
+          New-Item "$target/stop.flag" -ItemType File | Out-Null
+          if (-not $installer.WaitForExit(60000)) { throw 'Installer handoff timed out' }
+          $ready = $false
+          for ($i=0;$i -lt 100;$i++) {
+            if ((Test-Path "$target/started.marker") -and (Get-Content "$target/started.marker") -eq '0.2.0') { $ready=$true;break }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $ready) { throw 'Updated application did not restart' }
+          if ((Get-FileHash "$data/settings.json").Hash -ne $before) { throw 'Existing settings changed' }
+          $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+          if (-not (Test-Path "$desktop/轻连.lnk")) { throw 'Desktop shortcut missing' }
+          New-Item "$target/stop.flag" -ItemType File | Out-Null
+          Write-Output 'PASS: Windows old-process wait, replacement, restart, settings preservation and shortcut.'
