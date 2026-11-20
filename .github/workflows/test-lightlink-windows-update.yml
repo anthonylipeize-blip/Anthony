@@ -61,6 +61,9 @@ jobs:
           $code = $code.Replace('ApplicationConfiguration.Initialize();','File.AppendAllText(Path.Combine(Path.GetTempPath(),"lightlink-installer-ci.log"),"MAIN\\n");ApplicationConfiguration.Initialize();')
           $code = [regex]::Replace($code,'catch\(Exception e\)\s*\{','catch(Exception e){File.AppendAllText(Path.Combine(Path.GetTempPath(),"lightlink-installer-ci.log"),e.ToString()+"\\n");')
           $code = $code.Replace('catch{MessageBox.Show','catch(Exception shortcutError){File.AppendAllText(Path.Combine(Path.GetTempPath(),"lightlink-installer-ci.log"),shortcutError.ToString()+"\\n");MessageBox.Show')
+          if (-not $code.Contains('Directory.CreateDirectory(Path.GetDirectoryName(path)!);')) {
+            $code = $code.Replace('Type type=Type.GetTypeFromProgID','Directory.CreateDirectory(Path.GetDirectoryName(path)!);Type type=Type.GetTypeFromProgID')
+          }
           [IO.File]::WriteAllText($installerSource,$code)
           dotnet publish "$root/src/Installer/Installer.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o setup
           if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
