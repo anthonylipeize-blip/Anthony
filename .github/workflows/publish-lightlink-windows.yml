@@ -26,7 +26,7 @@ jobs:
           for f in p['files']:
               name=f['name']
               assert re.fullmatch(r'[A-Za-z0-9._-]+',name)
-              assert f['url'].startswith('https://209.38.175.101:38443/windows/')
+              assert f['url'].startswith('https://137.184.247.230:38443/windows/')
               h=hashlib.sha256()
               with urllib.request.urlopen(f['url'],context=ctx,timeout=120) as r,open(name,'wb') as out:
                   while chunk:=r.read(1024*1024): h.update(chunk);out.write(chunk)
